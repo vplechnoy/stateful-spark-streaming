@@ -70,49 +70,49 @@ object StatefulStreamingRestartFailure {
       sparkConf.setMaster("local[4]")
       val ssc = new StreamingContext(sparkConf, Duration(1000))
       ssc.checkpoint(checkpointDirectory)
+      
+      val socketStream: DStream[String] = ssc.socketTextStream(hostname = tcpHost, port = tcpPort)
+      socketStream.checkpoint(Seconds(1))
+
+      val flights: DStream[Feature] = socketStream.map(s => {
+        val columns: Array[String] = s.split(",").map(_.trim)
+        Flight(
+          columns(0),           // flightId
+          columns(1),           // flightTime
+          columns(2).toDouble,  // longitude
+          columns(3).toDouble,  // latitude
+          columns(4),           // origin
+          columns(5),           // destination
+          columns(6),           // aircraft
+          columns(7).toLong,     // altitude
+          new Point(columns(2).toDouble, columns(3).toDouble)
+        ).asInstanceOf[Feature]
+      })
+
+      // Process each RDD from each batch as it comes in
+      val sStream = StatefulStream(flights)
+      sStream.states.foreachRDD((rdd, time) => {
+        val sqlContext: SQLContext = SQLContextSingleton.getInstance(rdd.sparkContext)
+        import sqlContext.implicits._
+        val df = rdd.map {
+          case (flightId, flightState) => (flightId, flightState.feature.geometry.toString)
+        }.toDF("flightId", "geometry")
+
+        // Create a SQL table from this DataFrame
+        df.createOrReplaceTempView("flights")
+
+        // Dump out the results - you can do any SQL you want here.
+        val featureTracksDataFrame = sqlContext.sql(s"select * from flights")
+        println(s"========= Flights $time =========")
+        featureTracksDataFrame.show()
+      })
+      
       ssc
     }
 
     // Get StreamingContext from checkpoint data or create the context with a 1 second batch size
     // See [https://spark.apache.org/docs/2.4.1/streaming-programming-guide.html#checkpointing] for more details
     val ssc = StreamingContext.getOrCreate(checkpointDirectory, createStreamingContext)
-
-    val socketStream: DStream[String] = ssc.socketTextStream(hostname = tcpHost, port = tcpPort)
-    socketStream.checkpoint(Seconds(1))
-
-    val flights: DStream[Feature] = socketStream.map(s => {
-      val columns: Array[String] = s.split(",").map(_.trim)
-      Flight(
-        columns(0),           // flightId
-        columns(1),           // flightTime
-        columns(2).toDouble,  // longitude
-        columns(3).toDouble,  // latitude
-        columns(4),           // origin
-        columns(5),           // destination
-        columns(6),           // aircraft
-        columns(7).toLong,     // altitude
-        new Point(columns(2).toDouble, columns(3).toDouble)
-      ).asInstanceOf[Feature]
-    })
-
-    val sqlContext: SQLContext = SQLContextSingleton.getInstance(ssc.sparkContext)
-    import sqlContext.implicits._
-
-    // Process each RDD from each batch as it comes in
-    val sStream = StatefulStream(flights)
-    sStream.states.foreachRDD((rdd, time) => {
-      val df = rdd.map {
-        case (flightId, flightState) => (flightId, flightState.feature.geometry.toString)
-      }.toDF("flightId", "geometry")
-
-      // Create a SQL table from this DataFrame
-      df.createOrReplaceTempView("flights")
-
-      // Dump out the results - you can do any SQL you want here.
-      val featureTracksDataFrame = sqlContext.sql(s"select * from flights")
-      println(s"========= Flights $time =========")
-      featureTracksDataFrame.show()
-    })
 
     println("Starting execution...")
     // add the graceful shutdown hook
