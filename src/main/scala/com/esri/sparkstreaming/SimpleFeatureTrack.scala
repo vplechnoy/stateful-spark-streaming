@@ -4,23 +4,22 @@ import java.util
 import java.util.function.Predicate
 import java.util.{Collections, Comparator, NoSuchElementException}
 import scala.util.control.Breaks._
-import com.esri.arcgis.st.Feature
 
-case class MaxEntriesPredicate[Feature](var numEntries: Int) extends Predicate[Feature] with Serializable {
-  override def test(feature: Feature): Boolean = {
+case class NumEntriesPredicate[SimpleFeature](var numEntries: Int) extends Predicate[SimpleFeature] with Serializable {
+  override def test(feature: SimpleFeature): Boolean = {
     val testResult = numEntries > 0
     numEntries = if (testResult) numEntries - 1 else 0
     testResult
   }
 }
 
-case class FeatureTrack(purger: FeatureTrackPurger) extends Serializable {
-  val track: util.SortedSet[Feature] = new util.TreeSet[Feature](FeatureOrder.chronological)
-  def iterator: util.Iterator[Feature] = track.iterator
+case class SimpleFeatureTrack(purger: SimpleFeatureTrackPurger) extends Serializable {
+  val track: util.SortedSet[SimpleFeature] = new util.TreeSet[SimpleFeature](SimpleFeatureOrder.chronological)
+  def iterator: util.Iterator[SimpleFeature] = track.iterator
   def size: Int = track.size
   def isEmpty: Boolean = track.isEmpty
 
-  def contains(feature: Feature): Boolean = {
+  def contains(feature: SimpleFeature): Boolean = {
     try {
       return track.contains(feature)
     } catch {
@@ -29,7 +28,7 @@ case class FeatureTrack(purger: FeatureTrackPurger) extends Serializable {
     false
   }
 
-  def add(feature: Feature): Boolean = {
+  def add(feature: SimpleFeature): Boolean = {
     if (!contains(feature) && track.add(feature)) {
       purger.purge(this)
       return true
@@ -37,7 +36,7 @@ case class FeatureTrack(purger: FeatureTrackPurger) extends Serializable {
     false
   }
 
-  def remove(feature: Feature): Boolean = {
+  def remove(feature: SimpleFeature): Boolean = {
     try {
       return track.remove(feature)
     } catch {
@@ -48,7 +47,7 @@ case class FeatureTrack(purger: FeatureTrackPurger) extends Serializable {
 
   def clear(): Unit = track.clear()
 
-  def latest: Option[Feature] = Option(
+  def latest: Option[SimpleFeature] = Option(
     try {
       track.last
     } catch {
@@ -57,7 +56,7 @@ case class FeatureTrack(purger: FeatureTrackPurger) extends Serializable {
   )
 
 
-  def oldest: Option[Feature] = Option(
+  def oldest: Option[SimpleFeature] = Option(
     try {
       track.first
     } catch {
@@ -65,8 +64,8 @@ case class FeatureTrack(purger: FeatureTrackPurger) extends Serializable {
     }
   )
 
-  def previous(feature: Feature, predicate: MaxEntriesPredicate[Feature] = MaxEntriesPredicate(1), ordered: Comparator[Feature] = FeatureOrder.chronological): util.NavigableSet[Feature] = {
-    val features = new util.TreeSet[Feature](ordered)
+  def previous(feature: SimpleFeature, predicate: NumEntriesPredicate[SimpleFeature] = NumEntriesPredicate(1), ordered: Comparator[SimpleFeature] = SimpleFeatureOrder.chronological): util.NavigableSet[SimpleFeature] = {
+    val features = new util.TreeSet[SimpleFeature](ordered)
     val source = headSet(feature)
     if (source.size() >= predicate.numEntries) {
       try {
@@ -87,8 +86,8 @@ case class FeatureTrack(purger: FeatureTrackPurger) extends Serializable {
     features
   }
 
-  def next(feature: Feature, predicate: MaxEntriesPredicate[Feature] = MaxEntriesPredicate[Feature](1), ordered: Comparator[Feature] = FeatureOrder.chronological): util.NavigableSet[Feature] = {
-    val features = new util.TreeSet[Feature](ordered)
+  def next(feature: SimpleFeature, predicate: NumEntriesPredicate[SimpleFeature] = NumEntriesPredicate(1), ordered: Comparator[SimpleFeature] = SimpleFeatureOrder.chronological): util.NavigableSet[SimpleFeature] = {
+    val features = new util.TreeSet[SimpleFeature](ordered)
     val source = tailSet(feature)
     if (source.size() > predicate.numEntries) {
       try {
@@ -110,27 +109,27 @@ case class FeatureTrack(purger: FeatureTrackPurger) extends Serializable {
     features
   }
 
-  private def headSet(feature: Feature): util.NavigableSet[Feature] = {
+  private def headSet(feature: SimpleFeature): util.NavigableSet[SimpleFeature] = {
     try {
-      return new util.TreeSet[Feature](track.headSet(feature))
+      return new util.TreeSet[SimpleFeature](track.headSet(feature))
     } catch {
       case _: Exception =>
     }
     Collections.emptyNavigableSet()
   }
 
-  private def tailSet(feature: Feature): util.NavigableSet[Feature] = {
+  private def tailSet(feature: SimpleFeature): util.NavigableSet[SimpleFeature] = {
     try {
-      return new util.TreeSet[Feature](track.tailSet(feature))
+      return new util.TreeSet[SimpleFeature](track.tailSet(feature))
     } catch {
       case _: Exception =>
     }
     Collections.emptyNavigableSet()
   }
 
-  private def subSet(from: Feature, to: Feature): util.NavigableSet[Feature] = {
+  private def subSet(from: SimpleFeature, to: SimpleFeature): util.NavigableSet[SimpleFeature] = {
     try {
-      return new util.TreeSet[Feature](track.subSet(from, to))
+      return new util.TreeSet[SimpleFeature](track.subSet(from, to))
     } catch {
       case _: Exception =>
     }
@@ -138,10 +137,10 @@ case class FeatureTrack(purger: FeatureTrackPurger) extends Serializable {
   }
 }
 
-trait FeatureOrder extends Comparator[Feature] with Serializable
+trait SimpleFeatureOrder extends Comparator[SimpleFeature] with Serializable
 
-class ChronologicalFeatureOrder extends FeatureOrder {
-  override def compare(feature1: Feature, feature2: Feature): Int = {
+class ChronologicalSimpleFeatureOrder extends SimpleFeatureOrder {
+  override def compare(feature1: SimpleFeature, feature2: SimpleFeature): Int = {
     if (feature1.time.before(feature2.time))
       -1
     else if (feature1.time.after(feature2.time))
@@ -151,8 +150,8 @@ class ChronologicalFeatureOrder extends FeatureOrder {
   }
 }
 
-class ReversedFeatureOrder extends FeatureOrder {
-  override def compare(feature1: Feature, feature2: Feature): Int = {
+class ReversedSimpleFeatureOrder extends SimpleFeatureOrder {
+  override def compare(feature1: SimpleFeature, feature2: SimpleFeature): Int = {
     if (feature1.time.before(feature2.time))
       1
     else if (feature1.time.after(feature2.time))
@@ -162,7 +161,7 @@ class ReversedFeatureOrder extends FeatureOrder {
   }
 }
 
-object FeatureOrder {
-  def chronological: Comparator[Feature] = new ChronologicalFeatureOrder()
-  def reversed: Comparator[Feature] = new ReversedFeatureOrder()
+object SimpleFeatureOrder {
+  def chronological: Comparator[SimpleFeature] = new ChronologicalSimpleFeatureOrder()
+  def reversed: Comparator[SimpleFeature] = new ReversedSimpleFeatureOrder()
 }

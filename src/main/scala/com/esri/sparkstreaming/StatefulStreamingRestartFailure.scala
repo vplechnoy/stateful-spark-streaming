@@ -11,23 +11,23 @@ import scala.annotation.meta.param
 case class Flight(trackId: String, flightTime: String,
                   longitude: Double, latitude: Double,
                   origin: String, destination: String,
-                  aircraft: String, altitude: Long, time: Time, geometry: Point) extends Feature
+                  aircraft: String, altitude: Long, time: SimpleTime, geometry: SimplePoint) extends SimpleFeature
 
-case class FlightState(id: String, track: FeatureTrack)
+case class FlightState(id: String, track: SimpleFeatureTrack)
 
-case class StatefulStream(@(transient @param) parent: DStream[Feature], @(transient @param) states: DStream[(String, FlightState)])
+case class StatefulStream(@(transient @param) parent: DStream[SimpleFeature], @(transient @param) states: DStream[(String, FlightState)])
 
 object StatefulStream {
 
-  def apply(flights: DStream[Feature]): StatefulStream = {
+  def apply(flights: DStream[SimpleFeature]): StatefulStream = {
 
     val flightsWithTrackIds = flights.map(flight => (flight.trackId, flight))
 
     // We'll define our state using our trackStateFunc function called updateFeatureTrack above, and also specify a session timeout value of 30 minutes.
-    val stateSpec = StateSpec.function((trackId: String, featureOpt: Option[Feature], state: State[FlightState]) => {
-      val flightState: FlightState = state.getOption.getOrElse(FlightState(trackId, FeatureTrack(MaxFeaturesPerTrackPurger(10))))
+    val stateSpec = StateSpec.function((trackId: String, featureOpt: Option[SimpleFeature], state: State[FlightState]) => {
+      val flightState: FlightState = state.getOption.getOrElse(FlightState(trackId, SimpleFeatureTrack(MaxSimpleFeaturesPerTrackPurger(10))))
       featureOpt map {
-        feature: Feature => flightState.track add feature
+        feature: SimpleFeature => flightState.track add feature
       }
       state.update(flightState)
       flightState
@@ -60,7 +60,7 @@ object StatefulStreamingRestartFailure {
 
       val socketStream: DStream[String] = ssc.socketTextStream(hostname = tcpHost, port = tcpPort)
       socketStream.checkpoint(Seconds(1))
-      val flights: DStream[Feature] = socketStream.map(s => {
+      val flights: DStream[SimpleFeature] = socketStream.map(s => {
         val columns: Array[String] = s.split(",").map(_.trim)
         Flight(
           columns(0),           // flightId
@@ -71,9 +71,9 @@ object StatefulStreamingRestartFailure {
           columns(5),           // destination
           columns(6),           // aircraft
           columns(7).toLong,    // altitude
-          Time(columns(1)),     // time
-          new Point(columns(2).toDouble, columns(3).toDouble)
-        ).asInstanceOf[Feature]
+          SimpleTime(columns(1)),     // time
+          new SimplePoint(columns(2).toDouble, columns(3).toDouble)
+        ).asInstanceOf[SimpleFeature]
       })
 
       // Process each RDD from each batch as it comes in
