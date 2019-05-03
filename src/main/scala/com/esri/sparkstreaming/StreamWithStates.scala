@@ -1,27 +1,64 @@
 package com.esri.sparkstreaming
 
 import com.esri.arcgis.st.geometry.Point
-import com.esri.arcgis.st.time.{Time => ArcTime}
-import com.esri.arcgis.st.{FeatureSchema, Feature}
-import com.esri.sparkstreaming.FeatureFunctions.FeatureAttributeReader
+import com.esri.arcgis.st.spark.GenericFeatureSchemaRDD
+import com.esri.arcgis.st.time.Time
+import com.esri.arcgis.st.{BoundedValue, ExtendedInfo, Feature, FeatureSchema}
+import com.esri.realtime.analysis.tool.buffer.BufferCreator
+import com.esri.realtime.analysis.tool.geometry.Projector
+import com.esri.realtime.core.registry.ToolRegistry
+import com.esri.realtime.core.tool.SimpleTool
 import com.esri.sparkstreaming.Defaults._
+import com.esri.sparkstreaming.FeatureFunctions.FeatureAttributeReader
 import org.apache.log4j.{Level, Logger}
 import org.apache.spark.SparkConf
-import org.apache.spark.sql.{SQLContext, SparkSession}
+import org.apache.spark.sql.{DataFrame, SQLContext, SparkSession}
 import org.apache.spark.streaming._
 import org.apache.spark.streaming.dstream.DStream
 import org.joda.time.format.DateTimeFormat
 import scala.annotation.meta.param
 
+case class DStreamTransformer(stream: DStream[Feature], featureSchema: FeatureSchema, tool: SimpleTool) {
+
+  def transformSchema: FeatureSchema = tool.transformSchema(featureSchema)
+
+  def transform: DStream[Feature] = stream.transform(rdd => {
+    val extendedInfo: Option[ExtendedInfo] = Option(ExtendedInfo(BoundedValue(Long.MaxValue)))
+    val featureSchemaRDD: GenericFeatureSchemaRDD = new GenericFeatureSchemaRDD(rdd, featureSchema, extendedInfo)
+    tool.execute(featureSchemaRDD)
+  })
+}
+
 case class FeatureState(trackId: String, track: FeatureTrack)
 
-case class FeatureStreamWithStates(@(transient @param) stream: DStream[Feature], @(transient @param) states: DStream[(String, FeatureState)])
+case class StreamWithStates(@(transient @param) stream: DStream[Feature], @(transient @param) states: DStream[(String, FeatureState)]) {
 
-object FeatureStreamWithStates {
+  def showTempView(viewName: String): Unit = {
+    states.foreachRDD((rdd, time) => {
+      val sqlContext: SQLContext = SparkSession.builder.config(rdd.sparkContext.getConf).getOrCreate().sqlContext
+      import sqlContext.implicits._
 
-  def apply(features: DStream[Feature])(implicit featureSchema: FeatureSchema): FeatureStreamWithStates = {
+      val df: DataFrame = rdd.map {
+        case (flightId, flightState) => (flightId, flightState.track.size)
+      }.toDF(colNames = "flightId", "count")
 
-    val featuresWithTrackIds = features.map(feature => (feature.trackId, feature))
+      // Create a SQL table from this DataFrame
+      df.createOrReplaceTempView(viewName = viewName)
+
+      // Dump out the results - you can do any SQL you want here.
+      val featureTracksDataFrame = sqlContext.sql(s"select * from $viewName")
+      println(s"========= $viewName $time =========")
+      featureTracksDataFrame.show()
+    })
+  }
+}
+
+object StreamWithStates {
+
+  def apply(featureStream: DStream[Feature], featureSchema: FeatureSchema): StreamWithStates = {
+
+    featureStream.checkpoint(Seconds(1))
+    val featuresWithTrackIds = featureStream.map(feature => (feature.trackId(featureSchema), feature))
 
     // We'll define our state using our trackStateFunc function called updateFeatureTrack above, and also specify a session timeout value of 30 minutes.
     val featureStateSpec = StateSpec.function((trackId: String, featureOpt: Option[Feature], state: State[FeatureState]) => {
@@ -40,13 +77,13 @@ object FeatureStreamWithStates {
     val states: DStream[(String, FeatureState)] = featuresWithState.stateSnapshots()
     states.checkpoint(Seconds(1)) // enables state recovery on restart
 
-    FeatureStreamWithStates(features, states)
+    StreamWithStates(featureStream, states)
   }
 }
 
 object FeatureStreamWithStatesRunner {
 
-  implicit val featureSchema: FeatureSchema = FeatureSchema(
+  val flightsSchema: FeatureSchema = FeatureSchema(
     """
       |{
       |  "attributes": [
@@ -134,7 +171,7 @@ object FeatureStreamWithStatesRunner {
     val x: Double = java.lang.Double.parseDouble(columns(2))
     val y: Double = java.lang.Double.parseDouble(columns(3))
     val geometry = Point(x, y)
-    val time = ArcTime(DateTimeFormat.forPattern("MM/dd/yyyy hh:mm:ss a").parseDateTime(columns(1)).getMillis)
+    val time = Time(DateTimeFormat.forPattern("MM/dd/yyyy hh:mm:ss a").parseDateTime(columns(1)).getMillis)
 
     // parse attributes
     val attributes: Array[Any] = Array(
@@ -152,38 +189,58 @@ object FeatureStreamWithStatesRunner {
 
   def main(args: Array[String]): Unit = {
 
-    val rootLogger = Logger.getRootLogger
+    val rootLogger: Logger = Logger.getRootLogger
     rootLogger.setLevel(Level.ERROR)
 
     def createStreamingContext(): StreamingContext = {
-      val sparkConf = new SparkConf()
+      val sparkConf: SparkConf = new SparkConf()
       sparkConf.setAppName("FeatureStreamWithStates")
       sparkConf.setMaster("local[4]")
-      val ssc = new StreamingContext(sparkConf, Duration(1000))
+      val ssc: StreamingContext = new StreamingContext(sparkConf, Duration(1000))
       ssc.checkpoint(checkpointDirectory)
 
       val socketStream: DStream[String] = ssc.socketTextStream(hostname = tcpHost, port = tcpPort)
-      socketStream.checkpoint(Seconds(1))
       val flights: DStream[Feature] = socketStream.map(adaptFlight)
 
-      // Process each RDD from each batch as it comes in
-      val sStream = FeatureStreamWithStates(flights)
-      sStream.states.foreachRDD((rdd, time) => {
-        val sqlContext: SQLContext = SparkSession.builder.config(rdd.sparkContext.getConf).getOrCreate().sqlContext
-        import sqlContext.implicits._
+      // Flights State
+      val flightsWithStates: StreamWithStates = StreamWithStates(flights, flightsSchema)
+      flightsWithStates.showTempView("Flights")
 
-        val df = rdd.map {
-          case (flightId, flightState) => (flightId, flightState.track.size)
-        }.toDF("flightId", "count")
+      val flightsProjector: DStreamTransformer = DStreamTransformer(
+        stream = flights,
+        featureSchema = flightsSchema,
+        tool = (ToolRegistry.get(Projector.definition.name) match {
+          case Some(toolDef) => toolDef.newInstance(
+            Map(
+              Projector.Property.OutSr -> 3857
+            )
+          )
+          case None => null
+        }).asInstanceOf[SimpleTool]
+      )
 
-        // Create a SQL table from this DataFrame
-        df.createOrReplaceTempView("flights")
+      // Projected Flights State
+      val projectedFlightsWithStates: StreamWithStates = StreamWithStates(flightsProjector.transform, flightsProjector.transformSchema)
+      projectedFlightsWithStates.showTempView("ProjectedFlights")
 
-        // Dump out the results - you can do any SQL you want here.
-        val featureTracksDataFrame = sqlContext.sql(s"select * from flights")
-        println(s"========= Flights $time =========")
-        featureTracksDataFrame.show()
-      })
+      val flightsBufferCreator: DStreamTransformer = DStreamTransformer(
+        stream = flightsProjector.transform,
+        featureSchema = flightsProjector.transformSchema,
+        tool = (ToolRegistry.get(BufferCreator.definition.name) match {
+          case Some(toolDef) => toolDef.newInstance(
+            Map(
+              BufferCreator.Property.BufferBy -> "Distance",
+              BufferCreator.Property.Distance -> "100 meters",
+              BufferCreator.Property.Method -> "Geodesic"
+            )
+          )
+          case None => null
+        }).asInstanceOf[SimpleTool]
+      )
+
+      // Projected and Buffered Flights State
+//      val projectedAndBufferedFlightsWithStates: StreamWithStates = StreamWithStates(flightsBufferCreator.transform, flightsBufferCreator.transformSchema)
+//      projectedAndBufferedFlightsWithStates.showTempView("ProjectedAndBufferedFlights")
 
       ssc
     }

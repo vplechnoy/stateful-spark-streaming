@@ -3,29 +3,44 @@ package com.esri.sparkstreaming
 import com.esri.sparkstreaming.Defaults._
 import org.apache.log4j.{Level, Logger}
 import org.apache.spark.SparkConf
-import org.apache.spark.sql.{SQLContext, SparkSession}
+import org.apache.spark.sql.{DataFrame, SQLContext, SparkSession}
 import org.apache.spark.streaming._
 import org.apache.spark.streaming.dstream.DStream
 import scala.annotation.meta.param
 
-case class Flight(trackId: String, flightTime: String,
-                  longitude: Double, latitude: Double,
-                  origin: String, destination: String,
-                  aircraft: String, altitude: Long, time: SimpleTime, geometry: SimplePoint) extends SimpleFeature
+case class SimpleFeatureState(id: String, track: SimpleFeatureTrack)
 
-case class FlightState(id: String, track: SimpleFeatureTrack)
+case class StatefulStream(@(transient @param) stream: DStream[SimpleFeature], @(transient @param) states: DStream[(String, SimpleFeatureState)]) {
 
-case class StatefulStream(@(transient @param) parent: DStream[SimpleFeature], @(transient @param) states: DStream[(String, FlightState)])
+  def showTempView(viewName: String): Unit = {
+    states.foreachRDD((rdd, time) => {
+      val sqlContext: SQLContext = SparkSession.builder.config(rdd.sparkContext.getConf).getOrCreate().sqlContext
+      import sqlContext.implicits._
+
+      val df: DataFrame = rdd.map {
+        case (flightId, flightState) => (flightId, flightState.track.size)
+      }.toDF(colNames = "flightId", "count")
+
+      // Create a SQL table from this DataFrame
+      df.createOrReplaceTempView(viewName = viewName)
+
+      // Dump out the results - you can do any SQL you want here.
+      val featureTracksDataFrame = sqlContext.sql(s"select * from $viewName")
+      println(s"========= $viewName $time =========")
+      featureTracksDataFrame.show()
+    })
+  }
+}
 
 object StatefulStream {
 
-  def apply(flights: DStream[SimpleFeature]): StatefulStream = {
-
-    val flightsWithTrackIds = flights.map(flight => (flight.trackId, flight))
+  def apply(stream: DStream[SimpleFeature]): StatefulStream = {
+    stream.checkpoint(Seconds(1))
+    val flightsWithTrackIds = stream.map(flight => (flight.trackId, flight))
 
     // We'll define our state using our trackStateFunc function called updateFeatureTrack above, and also specify a session timeout value of 30 minutes.
-    val stateSpec = StateSpec.function((trackId: String, featureOpt: Option[SimpleFeature], state: State[FlightState]) => {
-      val flightState: FlightState = state.getOption.getOrElse(FlightState(trackId, SimpleFeatureTrack(MaxSimpleFeaturesPerTrackPurger(10))))
+    val stateSpec = StateSpec.function((trackId: String, featureOpt: Option[SimpleFeature], state: State[SimpleFeatureState]) => {
+      val flightState: SimpleFeatureState = state.getOption.getOrElse(SimpleFeatureState(trackId, SimpleFeatureTrack(MaxSimpleFeaturesPerTrackPurger(10))))
       featureOpt map {
         feature: SimpleFeature => flightState.track add feature
       }
@@ -37,14 +52,14 @@ object StatefulStream {
     val flightsWithState = flightsWithTrackIds.mapWithState(stateSpec)
 
     // Take a snapshot of the current state so we can look at it
-    val flightStates: DStream[(String, FlightState)] = flightsWithState.stateSnapshots()
+    val flightStates: DStream[(String, SimpleFeatureState)] = flightsWithState.stateSnapshots()
     flightStates.checkpoint(Seconds(1)) // enables state recovery on restart
 
-    StatefulStream(flights, flightStates)
+    StatefulStream(stream, flightStates)
   }
 }
 
-object StatefulStreamingRestartFailure {
+object StatefulStreamingWithMultipleStates {
 
   def main(args: Array[String]): Unit = {
 
@@ -60,6 +75,7 @@ object StatefulStreamingRestartFailure {
 
       val socketStream: DStream[String] = ssc.socketTextStream(hostname = tcpHost, port = tcpPort)
       socketStream.checkpoint(Seconds(1))
+
       val flights: DStream[SimpleFeature] = socketStream.map(s => {
         val columns: Array[String] = s.split(",").map(_.trim)
         Flight(
@@ -76,24 +92,30 @@ object StatefulStreamingRestartFailure {
         ).asInstanceOf[SimpleFeature]
       })
 
-      // Process each RDD from each batch as it comes in
-      val sStream = StatefulStream(flights)
-      sStream.states.foreachRDD((rdd, time) => {
-        val sqlContext:SQLContext = SparkSession.builder.config(rdd.sparkContext.getConf).getOrCreate().sqlContext
-        import sqlContext.implicits._
+      // 1) Flights state
+      val statefulFlights = StatefulStream(flights)
+      statefulFlights.showTempView("Flights")
 
-        val df = rdd.map {
-          case (flightId, flightState) => (flightId, flightState.track.size)
-        }.toDF("flightId", "count")
+      // 2) Let us add transformation
+      val flightsWithNoGeometry: DStream[SimpleFeature] = flights.transform(rdd => rdd.map(feature => {
+        val flight = feature.asInstanceOf[Flight]
+        Flight(
+          flight.trackId,
+          flight.flightTime,
+          flight.longitude,
+          flight.latitude,
+          flight.origin,
+          flight.destination,
+          flight.aircraft,
+          flight.altitude,
+          flight.time,
+          null // <- null the geometry
+        ).asInstanceOf[SimpleFeature]
+      }))
 
-        // Create a SQL table from this DataFrame
-        df.createOrReplaceTempView("flights")
-
-        // Dump out the results - you can do any SQL you want here.
-        val featureTracksDataFrame = sqlContext.sql(s"select * from flights")
-        println(s"========= Flights $time =========")
-        featureTracksDataFrame.show()
-      })
+      // 3) Flights with no geometry state
+      val statefulFlightsWithNoGeometry = StatefulStream(flightsWithNoGeometry)
+      statefulFlightsWithNoGeometry.showTempView("FlightsWithNoGeometry")
 
       ssc
     }
